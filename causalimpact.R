@@ -1,44 +1,84 @@
 library(CausalImpact)
 library(ggplot2)
+library(bigrquery)
+library(tidyverse)
 library(bsts)
+library(xts)
+library(tbl2xts)
 
 
-##### creating an example dataset
-set.seed(1)
-x1 <- 100 + arima.sim(model = list(ar = 0.999), n = 100)
-y <- 1.2 * x1 + rnorm(100)
 
-# y increases by 10 starting at 71.
-y[71:100] <- y[71:100] + 10
+# store the project id
+projectid = "source-data-314320"
 
-# cbind() combines Y and x1 columms in a dataframe.
-data <- cbind(y, x1)
+# set your query
+sql <- "SELECT 
+          date,
+          sum(CASE WHEN tienda = 'Centro' THEN sales ELSE 0 END) AS centro_sales,
+          sum(CASE WHEN tienda = 'Pl.Patria' THEN sales ELSE 0 END) AS patria_sales
+        FROM `source-data-314320.Store_Data.All_Data`
+        WHERE Owner = 'M&D'
+          AND date <= CURRENT_DATE()
+          AND date >= '2021-09-01'
+        GROUP BY date
+        ORDER BY Date
+"
 
-# check the dimensions of the data
-dim(data)
+# Run the query and store the data in a tibble
+data_centro <- bq_project_query(projectid, sql)
+
+bq_table_centro <- bq_table_download(data_centro)
+
+# Print first rows of the data
+bq_table_centro
+
+
+# get the earliest (min) and latest (max) dates
+earliest_date <- min(bq_table_centro$date)
+latest_date <- max(bq_table_centro$date)
+
+
+date.points <- data.frame(date = seq.Date(as.Date(earliest_date), by = 1, length.out = (latest_date - earliest_date) + 1))
+merged <- merge(date.points, bq_table_centro, by = "date", all = TRUE)
+
+xts <- merged %>%
+  select(date, centro_sales, patria_sales) %>%
+  tbl_xts(., cols_to_xts = c(centro_sales, patria_sales), Colnames_Exact = TRUE)
+
+
+View(xts)
+
+xts <- na.fill(xts, fill = 0.00)
+
+table.xts <- xts_tbl(xts, Colnames_Exact = FALSE)
+View(table.xts)
 
 
 # visualize the data
-matplot(data, type = "l")
+matplot(table.xts,
+        type = "l",
+        col = 2,
+        lwd = 2,
+        lty = 1)
+
+matlines(table.xts[, 2],
+        type = "l",
+        col = 1,
+        lwd = 2,
+        lty = 1)
+        
 
 
-
-##### working with dates
-time.points <- seq.Date(as.Date("2014-01-01"), by = 1, length.out = 100)
-data <- zoo(cbind(y, x1), order.by = time.points)
-head(data)
+# pre.period sets 30 days prior to latest date as training data. 30-day post-period used for predictions.
+pre.period <- as.Date(c(earliest_date, latest_date - 30))
+post.period <- as.Date(c(max(pre.period) + 1, latest_date))
 
 
-# specify the pre-/post-period dates for training & predictions, respectively.
-pre.period <- as.Date(c("2014-01-01", "2014-03-11"))
-post.period <- as.Date(c("2014-03-12", "2014-04-10"))
-
-
-impact <- CausalImpact(data, pre.period, post.period)
+impact <- CausalImpact(table.xts, pre.period, post.period)
 plot(impact)
 
 
-pred1 <- predict(impact, horizon = 100)
+
 
 
 # print out the summary table
